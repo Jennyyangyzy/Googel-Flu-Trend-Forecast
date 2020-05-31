@@ -1,0 +1,249 @@
+---
+title: "Google Flu Trend"
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
+author: "Zhenyi Yang"
+date: "29/05/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(readxl)
+library(MASS)
+library(forecast)
+library(timeSeries)
+library(timeDate)
+library(sarima)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+GFluTrends<-read_excel("/Users/jennyyang/Downloads/case_study_1_fluwatch.xlsx",sheet="Google Flu Trends", skip = 1)
+fluWatch<-read_excel("/Users/jennyyang/Downloads/case_study_1_fluwatch.xlsx", sheet="FluWatch-BC", skip = 2)
+tim<-timeSequence(from = "2003-09-28", to = "2015-08-09", by = "week")
+tim1<-timeSequence(from = "2003-09-07", to = "2015-08-23", by = "week")
+GFT<- timeSeries(GFluTrends[,"British Columbia"], charvec = tim)   
+fluTest<- timeSeries(fluWatch[,"FluTest"], charvec = tim1)
+```
+
+spliting data into training set and testing set:
+
+```{r}
+trainingsetGFT <- window(GFT,start="2003-09-28",end="2014-08-10")
+trainingsetfluTest <- window(fluTest,start="2003-09-28", end="2014-08-10")
+testingsetGFT <- window(GFT, start="2014-08-17", end="2015-08-09")
+testingsetgfluTest <- window(fluTest, start="2014-08-17", end="2015-08-09")
+```
+
+plots for training set:
+
+```{r}
+plot(trainingsetGFT,type = "b", pch = 19)
+grid ()
+plot(trainingsetfluTest,type = "b", pch = 19)
+grid()
+```
+
+plots for testing set:
+
+```{r}
+plot(testingsetGFT,type = "b", pch = 19)
+grid()
+plot(testingsetgfluTest,type = "b", pch = 19)
+grid()
+```
+
+
+```{r}
+PreWhiten.ar <- function(x, ar = NULL){
+  if(is.null(ar)) print("autoregressive coefficients are empty")
+  prewhdata = numeric(0)
+  prewhdata = filter(x, c(1, -ar),method = c("convo"),sides=1)
+  prewhdata[!is.na(prewhdata)]
+}
+
+PreWhiten.arma <- function(x, ar=NULL,ma=0){
+  if(is.null(ar) && is.null(ma)) print("both ar and ma coefficients are empty")
+  prewhdata=numeric(0)
+  mod = as(modelCoef(new("ArmaModel",ar=ar, ma=ma)),"list")
+  eps = numeric(length(x))
+  prewhdata=xarmaFilter(mod, x=x, eps = eps, whiten = TRUE)
+  prewhdata[!is.na(prewhdata)]
+}
+```
+
+```{r}
+mod.ar <- auto.arima(trainingsetGFT, max.p = 52, max.q = 0, stationary = TRUE) #, allowmean = FALSE)
+temp = PreWhiten.arma(trainingsetGFT, ar = mod.ar$coef[1:3], ma = 0) 
+temp1 = PreWhiten.ar(trainingsetGFT, ar = mod.ar$coef[1:3])
+par(mfrow = c(2,1), cex =0.5)
+plot(mod.ar)
+plot(c(temp1)-temp[-(1:3)], col = 1, 
+     ylab = "Difference", ylim = c(-0.01,0.01), pch = 15,
+     main = "Difference of prewhitened time series btw 2 filters")
+grid()
+```
+
+```{r}
+c(BoxCox.lambda(GFT),BoxCox.lambda(fluTest))
+```
+
+
+```{r}
+LBTest <- function(res, nPQ = 0, m = 24, ifPlot = FALSE){
+  stopifnot(nPQ >= 0, m >= 1, m > nPQ)
+  n <- length(res)
+  lags <- 1:m
+  df <- (nPQ + 1):m
+  ra <- (acf(res, lag.max = m, plot = FALSE)$acf)[-1]
+  QQ <- n*(n+2)*cumsum((ra^2)/(n-(1:m)))[df]
+  
+  pval <- 1-pchisq(QQ, df)
+  QQ <- round(QQ,2)
+  mat <- matrix(c(df,QQ,pval), ncol=3)
+  dimnames(mat) <- list(rep("",length(QQ)),c("m", "Qm", "pvalue"))
+  if(ifPlot){
+    plot(x = mat[,1], y=mat[,3],
+         ylim=c(0,1), pch =15, col =4,
+         ylab="pvalue", xlab = "m",
+         main = "Ljung-Box portmanteau test")
+    abline(h=0.05, col=2)
+    grid()
+  }else {
+    mat
+      }
+}
+```
+
+```{r}
+model_arma<-auto.arima(trainingsetGFT, max.p = 52, max.q = 52, stationary = TRUE) 
+a = model_arma$arma[1]
+b = model_arma$arma[2]
+coef(model_arma)
+```
+
+```{r}
+plot(model_arma)
+```
+Inverse AR and MA roots are all inside of the unit cicle therefore the fitted ARMA model is casual and invertible.
+
+```{r}
+npq = sum(model_arma$arma[c(1,2)])
+LBTest(model_arma$residuals, nPQ = npq, m = 52, ifPlot=TRUE)
+```
+
+```{r}
+mod <- model_arma 
+nAR <- mod$arma[1]
+nMA = mod$arma[2]
+if(nMA!=0){
+  xf = PreWhiten.arma(trainingsetGFT, ar = mod$coef[1:nAR], 
+                      ma = mod$coef[(1:nMA)+nAR])[-(1:nAR)]
+  yf = PreWhiten.arma(trainingsetfluTest, ar = mod$coef[1:nAR], 
+                      ma=mod$coef[(1:nMA)+nAR])[-(1:nAR)]  
+}else{
+  xf = PreWhiten.arma(trainingsetGFT, ar = mod$coef[1:nAR], 
+                      ma = 0)[-(1:nAR)]
+  yf = PreWhiten.arma(trainingsetfluTest, ar = mod$coef[1:nAR], 
+                      ma=0)[-(1:nAR)] 
+}
+
+par(cex=0.75,bg="gray95")
+ccf(c(xf), c(yf), lwd=1, ylab="Cross-correlation functions",
+    main="CCF of prewhitened GFT and flu test")
+abline(v=0, col="gold", lwd=2, lty="dashed")
+text(-1, 0.2, "-1", col=2)
+```
+
+```{r}
+dat<- cbind(fluTest,GFT, lag(GFT))[-c(1:5),]
+colnames(dat)<-c("fluTest", "GFT", "GFT1")
+data<- timeSeries(dat, charvec = tim)
+
+data.train = window(data, start = "2003-10-12", end = "2014-08-10")
+data.test = window(data, start = "2014-08-17", end = "2015-07-26")
+
+mod.tfn = auto.arima(data.train[,1], xreg = data.train[,-1], stationary = TRUE)
+coef(mod.tfn)
+```
+
+```{r}
+m = 26
+lags = 1:m
+df <- (1+1+1):m
+n = length(mod.tfn$res)
+rccf = ccf(mod$residuals,mod.tfn$residuals, plot = FALSE, lag.max = m)$acf[-(1:m)]
+Qm = n* (n + 2) * cumsum((rccf^2)/(n - (0:m)))[df]
+pv <- 1 - pchisq(Qm, df)
+a = cbind(df, Qm,pv)
+
+par(mfrow = c(1,2))
+LBTest(mod.tfn$res, nPQ = 6, ifPlot = TRUE)
+plot(x = a[,1],y = a[,3],
+     ylim = c(0,1), pch = 15, col =4,
+     ylab = "pvalue", xlab = "m",
+     main = "Cross-correlation check")
+abline(h =0.05, col =2)
+grid()
+```
+
+ARMA Model:
+```{r}
+model_full <- auto.arima(trainingsetfluTest, max.p = 52, max.q = 52, stationary = TRUE)
+coef(model_full)
+plot(model_full)
+```
+
+Netrual Network:
+```{r}
+mod_nnflutest = forecast::nnetar(trainingsetfluTest);mod_nnflutest
+```
+
+```{r}
+mod_nnx = forecast::nnetar(data.train[,1], xreg = data.train[,-1]);mod_nnx
+```
+
+Forecast Accuracy Evaluation:
+```{r}
+e=round(accuracy(model_full),2)
+f=round(accuracy(mod.tfn),2)
+g=round(accuracy(mod_nnflutest),2)
+l=round(accuracy((mod_nnx)),2)
+which.min(c(abs(as.data.frame(e)$ME),abs(as.data.frame(f)$ME),abs(as.data.frame(g)$ME),abs(as.data.frame(l)$ME)))
+```
+
+Estamating in short run:
+```{r}
+model_testing <- auto.arima(testingsetgfluTest, max.p = 52, max.q = 52, stationary = TRUE)
+model_tfntesting <- auto.arima(data.test[,1], xreg = data.test[,-1], stationary = TRUE)
+mod_nntesting1 <- forecast::nnetar(testingsetgfluTest, h=1);mod_nntesting1
+mod_nnxtesting <- forecast::nnetar(data.test[,1], xreg = data.test[,-1]);mod_nnxtesting
+bb=round(accuracy(model_testing),2)
+bc=round(accuracy(model_tfntesting),2)
+bd=round(accuracy(mod_nntesting1),2)
+be=round(accuracy(mod_nnxtesting),2)
+which.min(c(abs(as.data.frame(bb)$ME),abs(as.data.frame(bc)$ME),abs(as.data.frame(bd)$ME),abs(as.data.frame(be)$ME)))
+```
+
+Estamating for long run:
+```{r}
+model_testing <- auto.arima(testingsetgfluTest, max.p = 52, max.q = 52, stationary = TRUE)
+model_tfntesting <- auto.arima(data.test[,1], xreg = data.test[,-1], stationary = TRUE)
+mod_nntesting50 <- forecast::nnetar(testingsetgfluTest, h=50);mod_nntesting50
+mod_nnxtesting <- forecast::nnetar(data.test[,1], xreg = data.test[,-1]);mod_nnxtesting
+cc=round(accuracy(model_testing),2)
+cd=round(accuracy(model_tfntesting),2)
+ce=round(accuracy(mod_nntesting50),2)
+cf=round(accuracy(mod_nnxtesting),2)
+which.min(c(abs(as.data.frame(cc)$ME),abs(as.data.frame(cd)$ME),abs(as.data.frame(ce)$ME),abs(as.data.frame(cf)$ME)))
+```
